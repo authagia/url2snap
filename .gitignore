@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Runtime state (keep data/.gitkeep tracked)
+data/*.json
+data/*.tmp
+
+# Local/editor files
+.pytest_cache/
+.vscode/
+.idea/
+*.log
