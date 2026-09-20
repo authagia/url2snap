@@ -1,4 +1,4 @@
-# audio-source
+# snap2url
 
 Minimal HTTP control service for URL-based multi-room audio playback via mpv and
 Snapcast.
@@ -140,14 +140,14 @@ The default FIFO path is:
 ```
 
 The service creates the FIFO itself, so the runtime directory must be writable
-by the audio-source service user and traversable/readable by the Snapserver
+by the url2snap service user and traversable/readable by the Snapserver
 account.
 
 Example host setup (replace the user/group with the actual accounts on your
 machine):
 
 ```bash
-sudo install -d -o <audio-user> -g <snapserver-group> -m 0770 /run/snapcast
+sudo install -d -o <audio-user> -g <snapserver-group> -m 0777 /run/snapcast
 ```
 
 Snapserver should read the existing FIFO, for example:

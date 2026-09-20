@@ -33,7 +33,7 @@ class RepeatRequest(BaseModel):
 
 
 def create_app(controller: Controller) -> FastAPI:
-    app = FastAPI(title="audio-source")
+    app = FastAPI(title="url2snap")
 
     app.add_middleware(
         CORSMiddleware,

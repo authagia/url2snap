@@ -21,7 +21,7 @@ def ensure_fifo(path: str, mode: int = 0o660):
     except PermissionError as exc:
         raise PermissionError(
             f"cannot create FIFO directory {parent}; provision it for the "
-            "audio-source service user before startup"
+            "url2snap service user before startup"
         ) from exc
 
     if p.exists():

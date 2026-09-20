@@ -42,7 +42,7 @@ Target:
 - Document FIFO/runtime handling for both host and container deployments
 
 The first container milestone does **not** require moving Snapserver into the
-same container as audio-source.
+same container as url2snap.
 
 ## Later / optional
 
