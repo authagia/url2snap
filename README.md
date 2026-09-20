@@ -183,6 +183,7 @@ files, and retry behavior.
 | `AUDIO_SOURCE_YTDLP_METADATA_TIMEOUT` | `20` | Metadata lookup timeout in seconds |
 | `AUDIO_SOURCE_METADATA_WORKERS` | `2` | Concurrent metadata lookup workers |
 | `AUDIO_SOURCE_METADATA_ERROR_COOLDOWN` | `30` | Seconds to suppress repeated metadata failures |
+| `AUDIO_SOURCE_METADATA_REQUEST_INTERVAL` | `1.0` | Minimum seconds between metadata provider requests |
 
 A starter file is provided as `.env.example`. The application currently reads
 environment variables directly; loading `.env.example` requires your process
@@ -275,3 +276,18 @@ new data transport.
 `GET /status` also exposes `playback_started_at` for the currently active track,
 which is suitable for approximate UI elapsed-time display rather than accurate
 seeking.
+
+### Snapcast metadata integration
+
+url2snap exposes `playback.started`, `playback.stopped`, and `metadata.updated` over the existing `/events` SSE endpoint. Snapcast receives current-track metadata through a Snapcast stream `controlscript`: the Snapcast control API exposes stream playback properties, while stream metadata is published by the controlscript plugin using `Plugin.Stream.Player.Properties`.
+
+The repository includes `snapcast/meta_url2snap.py`, a stdlib-only Snapcast controlscript that subscribes to url2snap's SSE events and emits current-track title, artist, album, duration, original URL, and artwork URL.
+
+Example stream configuration:
+
+```ini
+[stream]
+source = pipe:///run/snapcast/snapfifo?name=default&mode=read&controlscript=meta_url2snap.py&controlscriptparams=--url2snap-host=127.0.0.1 --url2snap-port=1790
+```
+
+Install the controlscript into Snapserver's configured `plugin_dir` (default `/usr/share/snapserver/plug-ins`) or point `plugin_dir` at this repository's `snapcast/` directory. Snapserver starts the controlscript for the stream and communicates with it over stdin/stdout. See the Snapcast stream-plugin contract for details.

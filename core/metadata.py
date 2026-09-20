@@ -178,22 +178,28 @@ class MetadataWorker:
         *,
         worker_count: int = 2,
         error_cooldown: float = ERROR_COOLDOWN,
+        request_interval: float = 1.0,
     ):
         if worker_count < 1:
             raise ValueError("worker_count must be > 0")
         if error_cooldown < 0:
             raise ValueError("error_cooldown must be >= 0")
+        if request_interval < 0:
+            raise ValueError("request_interval must be >= 0")
 
         self.provider = provider
         self.events = events
         self.worker_count = worker_count
         self.error_cooldown = error_cooldown
+        self.request_interval = request_interval
         self._jobs: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._pending: set[str] = set()
         self._cache: dict[str, MediaMetadata] = {}
         self._errors: dict[str, float] = {}
         self._closed = False
+        self._rate_lock = asyncio.Lock()
+        self._next_request_at = 0.0
 
     async def start(self, urls: list[str] | None = None) -> None:
         if self._workers:
@@ -256,8 +262,21 @@ class MetadataWorker:
             log.debug("metadata worker %s stopped", worker_id)
             raise
 
+    async def _wait_for_request_slot(self) -> None:
+        if self.request_interval <= 0:
+            return
+
+        async with self._rate_lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_request_at - now)
+            if wait:
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+            self._next_request_at = now + self.request_interval
+
     async def _fetch_one(self, url: str) -> None:
         try:
+            await self._wait_for_request_slot()
             metadata = await self.provider.fetch(url)
         except Exception as exc:
             self._errors[url] = time.monotonic()

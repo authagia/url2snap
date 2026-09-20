@@ -35,6 +35,7 @@ class Controller:
         ytdlp_metadata_timeout: float = 20.0,
         metadata_workers: int = 2,
         metadata_error_cooldown: float = 30.0,
+        metadata_request_interval: float = 1.0,
     ):
         self.resolver = resolver
         self.queue = PlaybackQueue(repository=queue_repository)
@@ -49,6 +50,7 @@ class Controller:
             self.events,
             worker_count=metadata_workers,
             error_cooldown=metadata_error_cooldown,
+            request_interval=metadata_request_interval,
         )
 
         self._coordinator = PlaybackCoordinator(self)
@@ -108,12 +110,19 @@ class Controller:
             log.exception("failed to record history")
 
     async def _clear_current(self):
+        previous_track = self._current_track
+        previous_generation = self._generation
         self._playback_task = None
         self._current_track = None
         self._current_media = None
         self._current_source = None
         self._current_started_at = None
         self._current_retry_count = 0
+        if previous_track is not None:
+            await self.events.publish(
+                "playback.stopped",
+                {"url": previous_track.original_url, "generation": previous_generation},
+            )
         await self.events.publish("state.changed", {"resources": ["status"]})
 
     async def _stop_current(self, result: PlaybackResult, *, silence: bool):
@@ -154,6 +163,16 @@ class Controller:
         self._current_media = media
         self._current_source = source
         self._current_started_at = datetime.now(timezone.utc).isoformat()
+        metadata = self.metadata.get(track.original_url)
+        await self.events.publish(
+            "playback.started",
+            {
+                "url": track.original_url,
+                "generation": generation,
+                "started_at": self._current_started_at,
+                "metadata": metadata.to_dict() if metadata is not None else None,
+            },
+        )
         await self.events.publish("state.changed", {"resources": ["status"]})
 
         task = asyncio.create_task(self.session.play(media))
@@ -493,6 +512,7 @@ class Controller:
                 raise IndexError("playlist index out of range")
             playlist.items.insert(index, item)
         await self.playlists.save(playlist)
+        self.metadata.request(item.url)
         await self.events.publish("state.changed", {"resources": ["playlists"]})
         return {"id": item.id, "url": item.track.original_url}
 
@@ -526,6 +546,8 @@ class Controller:
             for url in urls
         ]
         await self.playlists.save(playlist)
+        for url in urls:
+            self.metadata.request(url)
         await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 

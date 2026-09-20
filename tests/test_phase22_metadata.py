@@ -81,7 +81,7 @@ async def test_metadata_worker_deduplicates_and_emits_update():
 
     bus = EventBus()
     subscriber = await bus.subscribe()
-    worker = MetadataWorker(Provider(), bus, worker_count=1)
+    worker = MetadataWorker(Provider(), bus, worker_count=1, request_interval=0)
     await worker.start()
     try:
         assert worker.request("https://example.test/a")
@@ -107,7 +107,7 @@ async def test_metadata_worker_is_best_effort_and_reports_errors():
 
     bus = EventBus()
     subscriber = await bus.subscribe()
-    worker = MetadataWorker(Provider(), bus, worker_count=1)
+    worker = MetadataWorker(Provider(), bus, worker_count=1, request_interval=0)
     await worker.start()
     try:
         assert worker.request("https://example.test/fail")
@@ -131,7 +131,7 @@ async def test_metadata_worker_can_be_closed_cleanly():
             return MediaMetadata(url=url)
 
     bus = EventBus()
-    worker = MetadataWorker(Provider(), bus, worker_count=2)
+    worker = MetadataWorker(Provider(), bus, worker_count=2, request_interval=0)
     await worker.start()
     worker.request("https://example.test/a")
     worker.request("https://example.test/b")
@@ -193,3 +193,31 @@ async def test_controller_prefetches_enqueued_url_and_exposes_metadata():
         controller._worker.cancel()
         await asyncio.gather(controller._worker, return_exceptions=True)
         await controller.close()
+
+@pytest.mark.asyncio
+async def test_metadata_worker_request_interval_is_global(monkeypatch):
+    import time
+
+    calls = []
+    started = []
+
+    class Provider:
+        async def fetch(self, url):
+            started.append(time.monotonic())
+            calls.append(url)
+            return MediaMetadata(url=url, title=url)
+
+    bus = EventBus()
+    worker = MetadataWorker(Provider(), bus, worker_count=2, request_interval=0.01)
+    await worker.start()
+    try:
+        for i in range(4):
+            worker.request(f"https://example.test/{i}")
+        deadline = time.monotonic() + 1
+        while len(calls) < 4 and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+        assert calls == [f"https://example.test/{i}" for i in range(4)]
+        assert all(b - a >= 0.009 for a, b in zip(started, started[1:]))
+    finally:
+        await worker.close()
+        await bus.unsubscribe(await bus.subscribe())
