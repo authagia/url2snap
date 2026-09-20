@@ -18,6 +18,7 @@ from config import (
     YTDLP_METADATA_TIMEOUT,
     METADATA_WORKERS,
     METADATA_ERROR_COOLDOWN,
+    METADATA_REQUEST_INTERVAL,
 )
 from core.controller import Controller
 from core.error_policy import RetryErrorPolicy, SkipErrorPolicy
@@ -63,6 +64,7 @@ async def main():
         ytdlp_metadata_timeout=YTDLP_METADATA_TIMEOUT,
         metadata_workers=METADATA_WORKERS,
         metadata_error_cooldown=METADATA_ERROR_COOLDOWN,
+        metadata_request_interval=METADATA_REQUEST_INTERVAL,
     )
 
     await controller.startup()
