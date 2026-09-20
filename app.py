@@ -30,7 +30,7 @@ async def main():
     ensure_fifo(SNAP_FIFO)
 
     resolver = ResolverChain([
-        SpotifyResolver(spotdl_bin=SPOTDL_BIN, timeout=SPOTDL_TIMEOUT), 
+        # SpotifyResolver(spotdl_bin=SPOTDL_BIN, timeout=SPOTDL_TIMEOUT), # TOO SLOW to Extract Youtube URL (≈ 1min)
         DirectResolver(),
     ])
     history = JsonHistoryRepository(HISTORY_FILE)
