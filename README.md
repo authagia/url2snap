@@ -257,3 +257,15 @@ See [`ROADMAP.md`](ROADMAP.md).
 The next major milestones are real deployment hardening and then containerization.
 Containerization is intentionally deferred until host-based mpv/Snapcast behavior
 has been validated for long-running use.
+
+
+### Realtime events
+
+`GET /events` exposes transient Server-Sent Events for state invalidation. The
+current event is `state.changed`; its `resources` payload identifies affected
+snapshots such as `status`, `queue`, `history`, `repeat`, or `playlists`. Clients
+should fetch the authoritative snapshot after receiving the event.
+
+`GET /status` also exposes `playback_started_at` for the currently active track,
+which is suitable for approximate UI elapsed-time display rather than accurate
+seeking.

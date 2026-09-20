@@ -49,6 +49,8 @@ same container as url2snap.
 - Configurable CORS origins
 - Authentication / authorization
 - SQLite repositories
-- WebSocket or SSE status events
 - Additional source-specific resolvers
 - Web UI
+
+- [x] Add transient SSE state-change notifications.
+- [x] Expose playback start timestamp for UI presentation.

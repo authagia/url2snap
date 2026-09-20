@@ -233,3 +233,32 @@ CORS is currently enabled for browser clients with all origins, methods, and
 request headers allowed and credentials disabled. This is suitable for a
 trusted-network development setup; restrict allowed origins before adding
 browser authentication or exposing the API publicly.
+
+
+## Realtime events
+
+`GET /events` provides a transient Server-Sent Events stream. It is an invalidation
+channel, not a durable event log. Clients should fetch the latest snapshot after
+receiving an event.
+
+Current event:
+
+```text
+event: state.changed
+data: {"resources":["status"]}
+```
+
+Possible resources are `status`, `queue`, `history`, `repeat`, and `playlists`.
+A connection also emits a comment immediately and periodic keepalive comments.
+
+## Status playback start
+
+`GET /status` includes:
+
+```json
+"playback_started_at": "2026-09-20T12:34:56.123456+00:00"
+```
+
+The value is the controller's logical playback start timestamp for the current
+track and is `null` when no track is active. It is intended for UI presentation
+such as an approximate elapsed-time indicator, not for sample-accurate seeking.

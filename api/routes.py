@@ -1,4 +1,8 @@
-from fastapi import FastAPI, HTTPException, status
+import asyncio
+import json
+
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -68,6 +72,37 @@ def create_app(controller: Controller) -> FastAPI:
     async def set_repeat(req: RepeatRequest):
         mode = await controller.set_repeat_mode(req.mode)
         return {"ok": True, "mode": mode.value}
+
+    @app.get("/events")
+    async def events(request: Request):
+        subscriber = await controller.events.subscribe()
+
+        async def stream():
+            try:
+                yield ": connected\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(subscriber.get(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    payload = json.dumps(event.data, ensure_ascii=False, separators=(",", ":"))
+                    yield f"event: {event.type}\ndata: {payload}\n\n"
+                    subscriber.task_done()
+            finally:
+                await controller.events.unsubscribe(subscriber)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/status")
     async def get_status():

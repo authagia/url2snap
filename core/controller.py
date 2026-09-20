@@ -4,8 +4,9 @@ import uuid
 from datetime import datetime, timezone
 
 from core.error_policy import ErrorAction, ErrorContext, ErrorPolicy, SkipErrorPolicy
+from core.events import EventBus
 from core.history import HistoryRepository, new_history_entry
-from core.models import PlaybackResult, PlaybackState, Playlist, PlaylistItem, RepeatMode, TrackRef, TrackListItem
+from core.models import PlaybackResult, PlaybackState, Playlist, PlaylistItem, RepeatMode, ResolvedSource, TrackRef, TrackListItem
 from core.playlists import PlaylistNotFound, PlaylistRepository
 from core.queue import PlaybackQueue, QueueRepository
 from core.tracklist import ActiveTrackList
@@ -43,6 +44,7 @@ class Controller:
         self._generation = 0
         self._repeat_mode = RepeatMode.NORMAL
         self._current_track: TrackRef | None = None
+        self._current_media: ResolvedSource | None = None
         self._current_source: str | None = None
         self._current_started_at: str | None = None
         self._current_retry_count = 0
@@ -51,6 +53,7 @@ class Controller:
         # the coordinator; persistent Queue/Playlist state is kept separate.
         self._active_tracklist: ActiveTrackList | None = None
         self._started = False
+        self.events = EventBus()
 
     async def startup(self):
         """Load persisted waiting state without automatically resuming playback."""
@@ -85,15 +88,18 @@ class Controller:
         )
         try:
             await self.history.add(entry)
+            await self.events.publish("state.changed", {"resources": ["history"]})
         except Exception:
             log.exception("failed to record history")
 
     async def _clear_current(self):
         self._playback_task = None
         self._current_track = None
+        self._current_media = None
         self._current_source = None
         self._current_started_at = None
         self._current_retry_count = 0
+        await self.events.publish("state.changed", {"resources": ["status"]})
 
     async def _stop_current(self, result: PlaybackResult, *, silence: bool):
         """End the current attempt and record the terminal result before clearing it."""
@@ -129,8 +135,10 @@ class Controller:
         self._generation += 1
         generation = self._generation
         self._current_track = track
+        self._current_media = media
         self._current_source = source
         self._current_started_at = datetime.now(timezone.utc).isoformat()
+        await self.events.publish("state.changed", {"resources": ["status"]})
 
         task = asyncio.create_task(self.session.play(media))
         self._playback_task = task
@@ -266,6 +274,7 @@ class Controller:
                 item = await self.queue.pop_next()
                 if item is None:
                     return
+                await self.events.publish("state.changed", {"resources": ["queue"]})
                 track = item.track
                 item_id = item.id
 
@@ -316,6 +325,7 @@ class Controller:
 
     async def set_repeat_mode(self, mode: RepeatMode):
         self._repeat_mode = mode
+        await self.events.publish("state.changed", {"resources": ["repeat", "status"]})
         return mode
 
     async def repeat_mode(self):
@@ -323,6 +333,7 @@ class Controller:
 
     async def enqueue(self, url: str):
         item = await self.queue.add(url)
+        await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
 
@@ -333,6 +344,7 @@ class Controller:
         if entry is None:
             raise KeyError(entry_id)
         item = await self.queue.add(entry.track.original_url)
+        await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
 
@@ -371,19 +383,22 @@ class Controller:
 
         active_remaining = len(self._active_tracklist) if self._active_tracklist is not None else 0
 
+        current_track = self._current_track
+        current_media = self._current_media
+        current = None
+        if current_track is not None:
+            current = {
+                "url": current_track.original_url,
+                "title": current_media.title if current_media is not None else None,
+                "duration": current_media.duration if current_media is not None else None,
+            }
+
         return {
             "state": self.session.state.value,
-            "current": (
-                {
-                    "url": self.session.current.url,
-                    "title": self.session.current.title,
-                    "duration": self.session.current.duration,
-                }
-                if self.session.current
-                else None
-            ),
+            "current": current,
             "queue_length": len(await self.queue.snapshot()),
             "repeat_mode": self._repeat_mode.value,
+            "playback_started_at": self._current_started_at,
             "playback_source": playback_source,
             "playback_list_remaining": active_remaining,
             "error_policy": getattr(self.error_policy, "name", self.error_policy.__class__.__name__),
@@ -419,6 +434,7 @@ class Controller:
             raise RuntimeError("playlist repository is not configured")
         tracks = [TrackRef(original_url=url) for url in (urls or [])]
         playlist = await self.playlists.create(name, tracks)
+        await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 
     async def delete_playlist(self, playlist_id: str):
@@ -428,6 +444,7 @@ class Controller:
             playlist = await self.playlists.delete(playlist_id)
         except PlaylistNotFound:
             raise KeyError(playlist_id)
+        await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 
     async def _get_playlist_or_raise(self, playlist_id: str):
@@ -448,6 +465,7 @@ class Controller:
                 raise IndexError("playlist index out of range")
             playlist.items.insert(index, item)
         await self.playlists.save(playlist)
+        await self.events.publish("state.changed", {"resources": ["playlists"]})
         return {"id": item.id, "url": item.track.original_url}
 
     async def remove_playlist_track(self, playlist_id: str, item_id: str):
@@ -456,6 +474,7 @@ class Controller:
             if item.id == item_id:
                 removed = playlist.items.pop(i)
                 await self.playlists.save(playlist)
+                await self.events.publish("state.changed", {"resources": ["playlists"]})
                 return {"id": removed.id, "url": removed.track.original_url}
         raise KeyError(item_id)
 
@@ -469,6 +488,7 @@ class Controller:
         item = playlist.items.pop(old_index)
         playlist.items.insert(index, item)
         await self.playlists.save(playlist)
+        await self.events.publish("state.changed", {"resources": ["playlists"]})
         return {"id": item.id, "url": item.track.original_url}
 
     async def replace_playlist(self, playlist_id: str, urls: list[str]):
@@ -478,6 +498,7 @@ class Controller:
             for url in urls
         ]
         await self.playlists.save(playlist)
+        await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 
     @staticmethod
@@ -486,14 +507,17 @@ class Controller:
 
     async def remove_queue_item(self, item_id: str):
         item = await self.queue.remove(item_id)
+        await self.events.publish("state.changed", {"resources": ["queue"]})
         return self._queue_item_dict(item)
 
     async def move_queue_item(self, item_id: str, index: int):
         item = await self.queue.move(item_id, index)
+        await self.events.publish("state.changed", {"resources": ["queue"]})
         return self._queue_item_dict(item)
 
     async def replace_queue(self, urls: list[str]):
         items = await self.queue.replace(urls)
+        await self.events.publish("state.changed", {"resources": ["queue"]})
         if (
             self.session.state == PlaybackState.IDLE
             and self.session.current is None
