@@ -27,6 +27,7 @@ control, ordered TrackLists, persistence, repeat/error policy, and the HTTP API.
 - Playlist playback without destroying the waiting queue
 - Playback history with replay or queue-from-history
 - Bounded retry policy with fresh URL resolution on every retry
+- Spotify track URLs resolved to YouTube URLs via spotDL
 - Automatic error skipping by default
 - CORS for browser-based clients
 - Versioned JSON persistence with atomic replacement
@@ -97,12 +98,14 @@ failures and mpv playback failures use the same policy.
 - Linux
 - Python 3.11+
 - `mpv`
+- `spotdl` (installed by `requirements.txt`)
 - Snapserver configured with a pipe/FIFO source
 - Network access to any remote media source you intend to play
 
 For sources such as YouTube, actual support depends on the local mpv setup and
-its input helpers (for example yt-dlp availability); there is no dedicated
-YouTube resolver in this project.
+its input helpers (for example yt-dlp availability). Spotify track URLs are
+resolved to YouTube URLs by spotDL before playback. spotDL uses yt-dlp for its
+YouTube provider; Deno is recommended by spotDL for some YouTube cases.
 
 ## Quick start
 
@@ -173,6 +176,8 @@ files, and retry behavior.
 | `AUDIO_SOURCE_ERROR_POLICY` | `skip` | `skip` or `retry` |
 | `AUDIO_SOURCE_MAX_RETRIES` | `2` | Retries when policy is `retry` |
 | `AUDIO_SOURCE_RETRY_DELAY_MS` | `0` | Delay between retries |
+| `AUDIO_SOURCE_SPOTDL_BIN` | `spotdl` | spotDL executable |
+| `AUDIO_SOURCE_SPOTDL_TIMEOUT` | `30` | spotDL resolve timeout in seconds |
 
 A starter file is provided as `.env.example`. The application currently reads
 environment variables directly; loading `.env.example` requires your process

@@ -19,6 +19,14 @@ handling to mpv and synchronized multi-room delivery to Snapcast.
 - Graceful shutdown and restart behavior
 - Review command serialization and controller boundaries under concurrency
 
+## Phase 21 — Spotify resolver POC
+
+- Resolve `open.spotify.com/track/...` URLs to YouTube URLs
+- Use spotDL as the external matching backend
+- Keep the output at the webpage URL layer so mpv + yt-dlp performs media resolution
+- Measure real-world match success / false matches with a small corpus
+- Generalize to additional music services only after the Spotify path is proven useful
+
 ## Phase 18 — Containerization milestone
 
 Containerization is intentionally deferred until the host deployment behavior

@@ -12,6 +12,8 @@ from config import (
     QUEUE_FILE,
     RETRY_DELAY_MS,
     SNAP_FIFO,
+    SPOTDL_BIN,
+    SPOTDL_TIMEOUT,
 )
 from core.controller import Controller
 from core.error_policy import RetryErrorPolicy, SkipErrorPolicy
@@ -21,12 +23,16 @@ from core.queue import JsonQueueRepository
 from output.fifo import ensure_fifo
 from resolver.chain import ResolverChain
 from resolver.direct import DirectResolver
+from resolver.spotify import SpotifyResolver
 
 
 async def main():
     ensure_fifo(SNAP_FIFO)
 
-    resolver = ResolverChain([DirectResolver()])
+    resolver = ResolverChain([
+        SpotifyResolver(spotdl_bin=SPOTDL_BIN, timeout=SPOTDL_TIMEOUT), 
+        DirectResolver(),
+    ])
     history = JsonHistoryRepository(HISTORY_FILE)
     playlists = JsonPlaylistRepository(PLAYLIST_FILE)
     queue_repository = JsonQueueRepository(QUEUE_FILE)
