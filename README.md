@@ -126,7 +126,7 @@ python app.py
 Default HTTP endpoint:
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:1790
 ```
 
 Interactive API documentation is available at `/docs`.
@@ -167,7 +167,7 @@ files, and retry behavior.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AUDIO_SOURCE_HTTP_HOST` | `0.0.0.0` | HTTP bind address |
-| `AUDIO_SOURCE_HTTP_PORT` | `8000` | HTTP port |
+| `AUDIO_SOURCE_HTTP_PORT` | `1790` | HTTP port |
 | `AUDIO_SOURCE_MPV_BIN` | `mpv` | mpv executable |
 | `AUDIO_SOURCE_SNAP_FIFO` | `/run/snapcast/snapfifo` | Snapcast FIFO |
 | `AUDIO_SOURCE_HISTORY_FILE` | `./data/history.json` | History store |

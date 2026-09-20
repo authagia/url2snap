@@ -1,6 +1,6 @@
 # API
 
-Base URL: `http://<host>:8000`
+Base URL: `http://<host>:1790`
 
 The service also exposes FastAPI's interactive OpenAPI UI at `/docs` and the
 OpenAPI schema at `/openapi.json`.

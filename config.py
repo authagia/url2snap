@@ -3,7 +3,7 @@ import os
 SNAP_FIFO = os.environ.get("AUDIO_SOURCE_SNAP_FIFO", "/run/snapcast/snapfifo")
 MPV_BIN = os.environ.get("AUDIO_SOURCE_MPV_BIN", "mpv")
 HTTP_HOST = os.environ.get("AUDIO_SOURCE_HTTP_HOST", "0.0.0.0")
-HTTP_PORT = int(os.environ.get("AUDIO_SOURCE_HTTP_PORT", "8000"))
+HTTP_PORT = int(os.environ.get("AUDIO_SOURCE_HTTP_PORT", "1790"))
 
 HISTORY_FILE = os.environ.get("AUDIO_SOURCE_HISTORY_FILE", "./data/history.json")
 PLAYLIST_FILE = os.environ.get("AUDIO_SOURCE_PLAYLIST_FILE", "./data/playlists.json")
