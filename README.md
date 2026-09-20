@@ -29,6 +29,7 @@ control, ordered TrackLists, persistence, repeat/error policy, and the HTTP API.
 - Bounded retry policy with fresh URL resolution on every retry
 - Spotify track URLs resolved to YouTube URLs via spotDL
 - Automatic error skipping by default
+- Background metadata prefetch with yt-dlp
 - CORS for browser-based clients
 - Versioned JSON persistence with atomic replacement
 - Direct `mpv -> snapfifo` raw PCM output
@@ -178,6 +179,10 @@ files, and retry behavior.
 | `AUDIO_SOURCE_RETRY_DELAY_MS` | `0` | Delay between retries |
 | `AUDIO_SOURCE_SPOTDL_BIN` | `spotdl` | spotDL executable |
 | `AUDIO_SOURCE_SPOTDL_TIMEOUT` | `30` | spotDL resolve timeout in seconds |
+| `AUDIO_SOURCE_YTDLP_BIN` | `yt-dlp` | yt-dlp executable used by the metadata worker |
+| `AUDIO_SOURCE_YTDLP_METADATA_TIMEOUT` | `20` | Metadata lookup timeout in seconds |
+| `AUDIO_SOURCE_METADATA_WORKERS` | `2` | Concurrent metadata lookup workers |
+| `AUDIO_SOURCE_METADATA_ERROR_COOLDOWN` | `30` | Seconds to suppress repeated metadata failures |
 
 A starter file is provided as `.env.example`. The application currently reads
 environment variables directly; loading `.env.example` requires your process
@@ -261,10 +266,11 @@ has been validated for long-running use.
 
 ### Realtime events
 
-`GET /events` exposes transient Server-Sent Events for state invalidation. The
-current event is `state.changed`; its `resources` payload identifies affected
-snapshots such as `status`, `queue`, `history`, `repeat`, or `playlists`. Clients
-should fetch the authoritative snapshot after receiving the event.
+`GET /events` exposes transient Server-Sent Events. `state.changed` remains the
+authoritative snapshot-invalidation event. Metadata work also emits
+`metadata.updated` and `metadata.error`, and then emits `state.changed` for the
+`queue`/`status` snapshots so existing clients can refresh without learning a
+new data transport.
 
 `GET /status` also exposes `playback_started_at` for the currently active track,
 which is suitable for approximate UI elapsed-time display rather than accurate

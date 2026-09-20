@@ -14,6 +14,10 @@ from config import (
     SNAP_FIFO,
     SPOTDL_BIN,
     SPOTDL_TIMEOUT,
+    YTDLP_BIN,
+    YTDLP_METADATA_TIMEOUT,
+    METADATA_WORKERS,
+    METADATA_ERROR_COOLDOWN,
 )
 from core.controller import Controller
 from core.error_policy import RetryErrorPolicy, SkipErrorPolicy
@@ -55,6 +59,10 @@ async def main():
         playlists=playlists,
         queue_repository=queue_repository,
         error_policy=error_policy,
+        ytdlp_bin=YTDLP_BIN,
+        ytdlp_metadata_timeout=YTDLP_METADATA_TIMEOUT,
+        metadata_workers=METADATA_WORKERS,
+        metadata_error_cooldown=METADATA_ERROR_COOLDOWN,
     )
 
     await controller.startup()

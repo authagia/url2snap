@@ -60,9 +60,8 @@ async def test_resolve_uses_spotdl_and_returns_youtube_url(monkeypatch):
     assert result.url == "https://www.youtube.com/watch?v=matched123"
     assert calls["args"] == (
         "spotdl",
+        "--audio=youtube",
         "url",
-        "--audio",
-        "youtube",
         "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
     )
     assert calls["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL

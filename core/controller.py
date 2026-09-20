@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from core.error_policy import ErrorAction, ErrorContext, ErrorPolicy, SkipErrorPolicy
 from core.events import EventBus
 from core.history import HistoryRepository, new_history_entry
+from core.metadata import MetadataWorker, YtDlpMetadataProvider
 from core.models import PlaybackResult, PlaybackState, Playlist, PlaylistItem, RepeatMode, ResolvedSource, TrackRef, TrackListItem
 from core.playlists import PlaylistNotFound, PlaylistRepository
 from core.queue import PlaybackQueue, QueueRepository
@@ -29,6 +30,11 @@ class Controller:
         playlists: PlaylistRepository | None = None,
         queue_repository: QueueRepository | None = None,
         error_policy: ErrorPolicy | None = None,
+        metadata_worker: MetadataWorker | None = None,
+        ytdlp_bin: str = "yt-dlp",
+        ytdlp_metadata_timeout: float = 20.0,
+        metadata_workers: int = 2,
+        metadata_error_cooldown: float = 30.0,
     ):
         self.resolver = resolver
         self.queue = PlaybackQueue(repository=queue_repository)
@@ -36,6 +42,14 @@ class Controller:
         self.history = history
         self.playlists = playlists
         self.error_policy = error_policy or SkipErrorPolicy()
+
+        self.events = EventBus()
+        self.metadata = metadata_worker or MetadataWorker(
+            YtDlpMetadataProvider(executable=ytdlp_bin, timeout=ytdlp_metadata_timeout),
+            self.events,
+            worker_count=metadata_workers,
+            error_cooldown=metadata_error_cooldown,
+        )
 
         self._coordinator = PlaybackCoordinator(self)
         self._commands = self._coordinator.commands
@@ -53,13 +67,13 @@ class Controller:
         # the coordinator; persistent Queue/Playlist state is kept separate.
         self._active_tracklist: ActiveTrackList | None = None
         self._started = False
-        self.events = EventBus()
 
     async def startup(self):
         """Load persisted waiting state without automatically resuming playback."""
         if self._started:
             return
         await self.queue.load()
+        await self.metadata.start([item.url for item in await self.queue.snapshot()])
         self._started = True
 
     async def _submit(self, command: str, payload=None) -> str:
@@ -71,6 +85,7 @@ class Controller:
             if self._current_track is not None or self._playback_task is not None:
                 await self._do_stop()
         finally:
+            await self.metadata.close()
             await self._coordinator.close()
 
     async def _record_history(
@@ -127,6 +142,7 @@ class Controller:
         # Resolve the new track first. If it fails, the current playback keeps
         # playing; this is important for a direct /play command that receives
         # a bad URL.
+        self.metadata.request(track.original_url, force=self.metadata.get(track.original_url) is None)
         media = await self.resolver.resolve(track)
 
         if self._current_track is not None or self._playback_task is not None:
@@ -160,6 +176,8 @@ class Controller:
         # Resolve before replacing current playback. If the first item cannot
         # be resolved, the current track and existing active plan stay intact.
         active = ActiveTrackList.from_playlist(playlist)
+        for item in active.snapshot():
+            self.metadata.request(item.url)
         first = active.pop_next()
         assert first is not None
         await self._start_track(first.track, source="playlist")
@@ -333,6 +351,7 @@ class Controller:
 
     async def enqueue(self, url: str):
         item = await self.queue.add(url)
+        self.metadata.request(item.url)
         await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
@@ -344,6 +363,7 @@ class Controller:
         if entry is None:
             raise KeyError(entry_id)
         item = await self.queue.add(entry.track.original_url)
+        self.metadata.request(item.url)
         await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
@@ -387,10 +407,18 @@ class Controller:
         current_media = self._current_media
         current = None
         if current_track is not None:
+            metadata = self.metadata.get(current_track.original_url)
             current = {
                 "url": current_track.original_url,
-                "title": current_media.title if current_media is not None else None,
-                "duration": current_media.duration if current_media is not None else None,
+                "title": (metadata.title if metadata is not None else None)
+                or (current_media.title if current_media is not None else None),
+                "artist": metadata.artist if metadata is not None else None,
+                "album": metadata.album if metadata is not None else None,
+                "duration": (metadata.duration if metadata is not None else None)
+                if (metadata is not None and metadata.duration is not None)
+                else (current_media.duration if current_media is not None else None),
+                "artwork_url": metadata.artwork_url if metadata is not None else None,
+                "is_live": metadata.is_live if metadata is not None else False,
             }
 
         return {
@@ -501,9 +529,13 @@ class Controller:
         await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 
-    @staticmethod
-    def _queue_item_dict(item):
-        return {"id": item.id, "url": item.url}
+    def _queue_item_dict(self, item):
+        metadata = self.metadata.get(item.url)
+        return {
+            "id": item.id,
+            "url": item.url,
+            "metadata": metadata.to_dict() if metadata is not None else None,
+        }
 
     async def remove_queue_item(self, item_id: str):
         item = await self.queue.remove(item_id)
@@ -517,6 +549,8 @@ class Controller:
 
     async def replace_queue(self, urls: list[str]):
         items = await self.queue.replace(urls)
+        for item in items:
+            self.metadata.request(item.url)
         await self.events.publish("state.changed", {"resources": ["queue"]})
         if (
             self.session.state == PlaybackState.IDLE
