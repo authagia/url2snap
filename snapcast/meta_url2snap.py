@@ -261,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url2snap-port", type=int, default=1790)
     parser.add_argument("--reconnect-delay", type=float, default=2.0)
     parser.add_argument("--debug", action="store_true")
-    return parser.parse_known_args()
+    return parser.parse_known_args()[0]
 
 
 def main() -> None:
