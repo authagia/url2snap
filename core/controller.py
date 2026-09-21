@@ -274,21 +274,21 @@ class Controller:
             completed_track = self._current_track
             completed_source = self._current_source
 
-            if self._repeat_mode == RepeatMode.REPEAT_ONE and completed_track is not None:
-                source = completed_source or "direct"
-                await self._clear_current()
-                await self._start_track(completed_track, source=source)
-            else:
-                await self._clear_current()
-                if self._repeat_mode == RepeatMode.REPEAT_QUEUE and completed_track is not None:
-                    if completed_source == "playlist" and self._active_tracklist is not None:
-                        self._active_tracklist.append(TrackListItem(
-                            id=uuid.uuid4().hex[:12],
-                            track=completed_track,
-                        ))
-                    elif completed_source == "queue":
-                        await self.queue.add(completed_track.original_url)
-                await self._start_next_if_available()
+        if self._repeat_mode == RepeatMode.REPEAT_ONE and completed_track is not None:
+            source = completed_source or "direct"
+            await self._clear_current()
+            await self._start_track(completed_track, source=source)
+        else:
+            await self._clear_current()
+            if self._repeat_mode == RepeatMode.REPEAT_QUEUE and completed_track is not None:
+                if completed_source == "playlist" and self._active_tracklist is not None:
+                    self._active_tracklist.append(TrackListItem(
+                        id=uuid.uuid4().hex[:12],
+                        track=completed_track,
+                    ))
+                elif completed_source == "queue":
+                    await self.queue.add(completed_track.original_url)
+            await self._start_next_if_available()
         # STOPPED/SKIPPED are handled by their command paths.
 
     def _clear_active_tracklist(self):
