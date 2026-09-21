@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from core.error_policy import ErrorAction, ErrorContext, ErrorPolicy, SkipErrorPolicy
@@ -16,6 +17,59 @@ from resolver.chain import ResolverChain
 from core.playback import PlaybackCoordinator
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class _PlaybackContext:
+    """Mutable state for the currently owned playback attempt.
+
+    The controller exposes compatibility properties for these fields because
+    tests and a few internal helpers historically accessed them directly. The
+    context itself owns the state transitions so clearing/replacing an attempt
+    cannot accidentally reset only half of the fields.
+    """
+
+    generation: int = 0
+    task: asyncio.Task | None = None
+    track: TrackRef | None = None
+    media: ResolvedSource | None = None
+    source: str | None = None
+    started_at: str | None = None
+    retry_count: int = 0
+
+    def has_current(self) -> bool:
+        return self.track is not None or self.task is not None
+
+    def invalidate(self) -> int:
+        self.generation += 1
+        return self.generation
+
+    def begin(
+        self,
+        track: TrackRef,
+        media: ResolvedSource,
+        source: str,
+        started_at: str,
+    ) -> int:
+        self.generation += 1
+        self.track = track
+        self.media = media
+        self.source = source
+        self.started_at = started_at
+        self.retry_count = 0
+        self.task = None
+        return self.generation
+
+    def clear(self) -> tuple[TrackRef | None, int]:
+        previous_track = self.track
+        previous_generation = self.generation
+        self.task = None
+        self.track = None
+        self.media = None
+        self.source = None
+        self.started_at = None
+        self.retry_count = 0
+        return previous_track, previous_generation
 
 
 class Controller:
@@ -56,19 +110,71 @@ class Controller:
         self._coordinator = PlaybackCoordinator(self)
         self._commands = self._coordinator.commands
         self._worker = self._coordinator.worker
-        self._playback_task: asyncio.Task | None = None
-        self._generation = 0
+        self._playback = _PlaybackContext()
         self._repeat_mode = RepeatMode.NORMAL
-        self._current_track: TrackRef | None = None
-        self._current_media: ResolvedSource | None = None
-        self._current_source: str | None = None
-        self._current_started_at: str | None = None
-        self._current_retry_count = 0
 
         # A transient playback TrackList. It is owned and consumed by
         # the coordinator; persistent Queue/Playlist state is kept separate.
         self._active_tracklist: ActiveTrackList | None = None
         self._started = False
+
+    # Compatibility accessors keep the existing private test seam while the
+    # playback state itself now has one owner.
+    @property
+    def _playback_task(self):
+        return self._playback.task
+
+    @_playback_task.setter
+    def _playback_task(self, value):
+        self._playback.task = value
+
+    @property
+    def _generation(self):
+        return self._playback.generation
+
+    @_generation.setter
+    def _generation(self, value):
+        self._playback.generation = value
+
+    @property
+    def _current_track(self):
+        return self._playback.track
+
+    @_current_track.setter
+    def _current_track(self, value):
+        self._playback.track = value
+
+    @property
+    def _current_media(self):
+        return self._playback.media
+
+    @_current_media.setter
+    def _current_media(self, value):
+        self._playback.media = value
+
+    @property
+    def _current_source(self):
+        return self._playback.source
+
+    @_current_source.setter
+    def _current_source(self, value):
+        self._playback.source = value
+
+    @property
+    def _current_started_at(self):
+        return self._playback.started_at
+
+    @_current_started_at.setter
+    def _current_started_at(self, value):
+        self._playback.started_at = value
+
+    @property
+    def _current_retry_count(self):
+        return self._playback.retry_count
+
+    @_current_retry_count.setter
+    def _current_retry_count(self, value):
+        self._playback.retry_count = value
 
     async def startup(self):
         """Load persisted waiting state without automatically resuming playback."""
@@ -110,7 +216,7 @@ class Controller:
             log.exception("failed to record history")
 
     def _has_current_playback(self) -> bool:
-        return self._current_track is not None or self._playback_task is not None
+        return self._playback.has_current()
 
     def _request_metadata(self, urls):
         for url in urls:
@@ -120,14 +226,7 @@ class Controller:
         self._active_tracklist = None
 
     async def _clear_current(self):
-        previous_track = self._current_track
-        previous_generation = self._generation
-        self._playback_task = None
-        self._current_track = None
-        self._current_media = None
-        self._current_source = None
-        self._current_started_at = None
-        self._current_retry_count = 0
+        previous_track, previous_generation = self._playback.clear()
         if previous_track is not None:
             await self.events.publish(
                 "playback.stopped",
@@ -141,7 +240,7 @@ class Controller:
         started_at = self._current_started_at
         task = self._playback_task
 
-        self._generation += 1
+        self._playback.invalidate()
         if task is not None and not task.done():
             await self.session.stop(result, silence=silence)
             await asyncio.gather(task, return_exceptions=True)
@@ -172,29 +271,29 @@ class Controller:
         if self._has_current_playback():
             await self._stop_current(PlaybackResult.STOPPED, silence=True)
 
-        self._generation += 1
-        generation = self._generation
-        self._current_track = track
-        self._current_media = media
-        self._current_source = source
-        self._current_started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
+        generation = self._playback.begin(track, media, source, started_at)
         metadata = self.metadata.get(track.original_url)
         await self.events.publish(
             "playback.started",
             {
                 "url": track.original_url,
                 "generation": generation,
-                "started_at": self._current_started_at,
+                "started_at": started_at,
                 "metadata": metadata.to_dict() if metadata is not None else None,
             },
         )
         await self.events.publish("state.changed", {"resources": ["status"]})
 
         task = asyncio.create_task(self.session.play(media))
-        self._playback_task = task
+        self._playback.task = task
+        self._watch_playback_task(task, generation)
 
-        def finished(done_task: asyncio.Task, gen=generation):
-            asyncio.create_task(self._commands.put(("finished", gen, None)))
+    def _watch_playback_task(self, task: asyncio.Task, generation: int):
+        """Convert a finished player task into the serialized controller command."""
+
+        def finished(_done_task: asyncio.Task):
+            asyncio.create_task(self._commands.put(("finished", generation, None)))
 
         task.add_done_callback(finished)
 
@@ -423,6 +522,26 @@ class Controller:
         if self.session.state == PlaybackState.IDLE and not self.session.current and not self._has_current_playback():
             await self._start_next_if_available()
 
+    async def _handle_playback_result(
+        self,
+        track: TrackRef,
+        source: str,
+        result: PlaybackResult,
+    ):
+        """Route one terminal playback result to its policy handler."""
+        if result == PlaybackResult.ERROR:
+            await self._finish_error(track, source)
+            return
+        if result == PlaybackResult.COMPLETED:
+            await self._finish_completed(track, source)
+            return
+
+        # STOPPED and SKIPPED are both terminal, user-visible omissions.
+        # Their caller already decided to end the current attempt, so only
+        # advance through the configured repeat/queue semantics here.
+        await self._clear_current()
+        await self._continue_after_skip(track, source)
+
     async def _do_finished(self, generation: int):
         if generation != self._generation:
             return
@@ -439,16 +558,7 @@ class Controller:
             return
 
         await self._record_history(track, result, started_at)
-        if result == PlaybackResult.ERROR:
-            await self._finish_error(track, source)
-        elif result == PlaybackResult.COMPLETED:
-            await self._finish_completed(track, source)
-        elif result == PlaybackResult.SKIPPED:
-            await self._clear_current()
-            await self._continue_after_skip(track, source)
-        else:
-            await self._clear_current()
-            await self._continue_after_skip(track, source)
+        await self._handle_playback_result(track, source, result)
 
     async def play_playlist(self, playlist_id: str) -> str:
         playlist = await self._get_playlist_or_raise(playlist_id)
