@@ -2,7 +2,6 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from enum import Enum
 
 from core.error_policy import ErrorAction, ErrorContext, ErrorPolicy, SkipErrorPolicy
 from core.events import EventBus
@@ -17,12 +16,6 @@ from resolver.chain import ResolverChain
 from core.playback import PlaybackCoordinator
 
 log = logging.getLogger(__name__)
-
-
-class _StartOutcome(str, Enum):
-    STARTED = "started"
-    ADVANCE = "advance"
-    STOP = "stop"
 
 
 class Controller:
@@ -116,7 +109,17 @@ class Controller:
         except Exception:
             log.exception("failed to record history")
 
-    async def _clear_current(self, *, preserve_retry_count: bool = False):
+    def _has_current_playback(self) -> bool:
+        return self._current_track is not None or self._playback_task is not None
+
+    def _request_metadata(self, urls):
+        for url in urls:
+            self.metadata.request(url)
+
+    def _clear_active_tracklist(self):
+        self._active_tracklist = None
+
+    async def _clear_current(self):
         previous_track = self._current_track
         previous_generation = self._generation
         self._playback_task = None
@@ -124,8 +127,7 @@ class Controller:
         self._current_media = None
         self._current_source = None
         self._current_started_at = None
-        if not preserve_retry_count:
-            self._current_retry_count = 0
+        self._current_retry_count = 0
         if previous_track is not None:
             await self.events.publish(
                 "playback.stopped",
@@ -155,83 +157,19 @@ class Controller:
         await self._record_history(track, actual_result, started_at)
         await self._clear_current()
 
-    async def _decide_error_action(
-        self,
-        track: TrackRef,
-        source: str,
-        attempt: int,
-        *,
-        error: BaseException | None = None,
-        item_id: str | None = None,
-    ) -> ErrorAction:
-        """Apply the configured error policy once and log the decision."""
-        action = await self.error_policy.decide(
-            ErrorContext(
-                track=track,
-                source=source,
-                attempt=attempt,
-                result=PlaybackResult.ERROR,
-                error=error,
-            )
-        )
-        log.warning(
-            "playback failed for %s (attempt=%s, action=%s)",
-            item_id or track.original_url,
-            attempt + 1,
-            action.value,
-        )
-        return action
-
-    async def _requeue_for_repeat_queue(self, track: TrackRef, source: str) -> None:
-        """Return a track to its source when repeat-queue is active."""
-        if self._repeat_mode != RepeatMode.REPEAT_QUEUE:
-            return
-
-        if source == "playlist" and self._active_tracklist is not None:
-            self._active_tracklist.append(
-                TrackListItem(id=uuid.uuid4().hex[:12], track=track)
-            )
-        elif source == "queue":
-            await self.queue.add(track.original_url)
-            await self.events.publish("state.changed", {"resources": ["queue"]})
-
-    async def _retry_repeat_one(self, track: TrackRef, source: str) -> None:
-        """Retry the same track until start succeeds, bypassing retry policy."""
-        while True:
-            try:
-                await self._start_track(track, source=source)
-                self._current_retry_count = 0
-                return
-            except Exception:
-                log.exception(
-                    "repeat-one retry failed for %s",
-                    track.original_url,
-                )
-                await asyncio.sleep(0)
-
-    async def _apply_repeat_after_skip(self, track: TrackRef, source: str) -> bool:
-        """Apply repeat behavior after a track has been skipped.
-
-        Returns True when playback has already been restarted (repeat-one).
-        """
-        if self._repeat_mode == RepeatMode.REPEAT_ONE:
-            await self._retry_repeat_one(track, source)
-            return True
-
-        await self._requeue_for_repeat_queue(track, source)
-        return False
-
     async def _start_track(self, track: TrackRef, *, source: str = "direct"):
-        # Resolve the new track first. If it fails, the current playback keeps
-        # playing; this is important for a direct /play command that receives
-        # a bad URL.
+        """Resolve one stable TrackRef and launch one playback attempt.
+
+        This is intentionally policy-free. Callers that need retry/skip
+        semantics use _start_track_with_policy() around it.
+        """
         self.metadata.request(
             track.original_url,
             force=self.metadata.get(track.original_url) is None,
         )
         media = await self.resolver.resolve(track)
 
-        if self._current_track is not None or self._playback_task is not None:
+        if self._has_current_playback():
             await self._stop_current(PlaybackResult.STOPPED, silence=True)
 
         self._generation += 1
@@ -260,46 +198,191 @@ class Controller:
 
         task.add_done_callback(finished)
 
+    async def _decide_error_action(
+        self,
+        track: TrackRef,
+        source: str,
+        attempt: int,
+        *,
+        error: BaseException | None = None,
+    ) -> ErrorAction:
+        action = await self.error_policy.decide(
+            ErrorContext(
+                track=track,
+                source=source,
+                attempt=attempt,
+                result=PlaybackResult.ERROR,
+                error=error,
+            )
+        )
+        log.warning(
+            "playback failed for %s (attempt=%s, action=%s)",
+            track.original_url,
+            attempt + 1,
+            action.value,
+        )
+        return action
+
     async def _start_track_with_policy(
         self,
         track: TrackRef,
         *,
         source: str,
         attempt: int = 0,
-        item_id: str | None = None,
-    ) -> _StartOutcome:
-        """Start a track, applying retry policy and then repeat-on-skip.
+    ) -> ErrorAction | None:
+        """Start a track, retrying start/resolve failures per ErrorPolicy.
 
-        Returns STARTED when playback was started, ADVANCE when the caller
-        should move to another track, and STOP when playback should stop.
+        Returns None when playback was launched. Otherwise returns the
+        terminal ErrorAction selected by the policy.
         """
         while True:
             try:
                 await self._start_track(track, source=source)
                 self._current_retry_count = attempt
-                return _StartOutcome.STARTED
+                return None
             except Exception as exc:
                 action = await self._decide_error_action(
                     track,
                     source,
                     attempt,
                     error=exc,
-                    item_id=item_id,
                 )
                 if action == ErrorAction.RETRY:
                     attempt += 1
                     continue
-
                 await self._record_history(track, PlaybackResult.ERROR)
-                if action == ErrorAction.STOP:
-                    self._current_retry_count = 0
-                    self._clear_active_tracklist()
-                    return _StartOutcome.STOP
+                return action
 
-                if await self._apply_repeat_after_skip(track, source):
-                    return _StartOutcome.STARTED
-                self._current_retry_count = 0
-                return _StartOutcome.ADVANCE
+    async def _repeat_current(self, track: TrackRef, source: str):
+        await self._clear_current()
+        await self._start_track(track, source=source)
+
+    async def _requeue_for_repeat_queue(self, track: TrackRef, source: str):
+        if source == "playlist" and self._active_tracklist is not None:
+            self._active_tracklist.append(
+                TrackListItem(id=uuid.uuid4().hex[:12], track=track)
+            )
+        elif source == "queue":
+            await self.queue.add(track.original_url)
+            await self.events.publish("state.changed", {"resources": ["queue"]})
+
+    async def _continue_after_skip(
+        self,
+        track: TrackRef,
+        source: str,
+        *,
+        repeat_one: bool = False,
+    ):
+        """Apply repeat semantics after an item has been skipped."""
+        if repeat_one and self._repeat_mode == RepeatMode.REPEAT_ONE:
+            await self._restart_repeat_one(track, source)
+            return
+        if self._repeat_mode == RepeatMode.REPEAT_QUEUE:
+            await self._requeue_for_repeat_queue(track, source)
+        await self._start_next_if_available()
+
+    async def _restart_repeat_one(self, track: TrackRef, source: str):
+        """Keep retrying a failed item under repeat-one semantics.
+
+        The caller has already cleared the terminal playback state. ErrorPolicy
+        still applies to each individual start attempt; once its retry budget
+        is exhausted, repeat-one starts another policy cycle for the same
+        TrackRef, making the overall behavior unbounded while keeping the
+        policy itself bounded.
+        """
+        while True:
+            action = await self._start_track_with_policy(track, source=source)
+            if action is None:
+                return
+            if action == ErrorAction.STOP:
+                self._clear_active_tracklist()
+                return
+            await self._clear_current()
+
+    async def _next_playback_item(self):
+        """Pop the next item from the active plan, then the waiting queue."""
+        while True:
+            if self._active_tracklist is not None:
+                item = self._active_tracklist.pop_next()
+                if item is not None:
+                    return item.track, self._active_tracklist.source_type, None
+                self._clear_active_tracklist()
+                continue
+
+            item = await self.queue.pop_next()
+            if item is None:
+                return None
+            await self.events.publish("state.changed", {"resources": ["queue"]})
+            return item.track, "queue", item.id
+
+    async def _start_next_if_available(self):
+        """Start the next TrackRef, applying ErrorPolicy and repeat policy."""
+        while True:
+            next_item = await self._next_playback_item()
+            if next_item is None:
+                return
+            track, source, item_id = next_item
+
+            action = await self._start_track_with_policy(track, source=source)
+            if action is None:
+                return
+            if action == ErrorAction.STOP:
+                self._clear_active_tracklist()
+                return
+
+            # A start-time SKIP is a terminal skip. Repeat policy is handled at
+            # this boundary instead of being duplicated inside the retry loop.
+            if self._repeat_mode == RepeatMode.REPEAT_ONE:
+                await self._restart_repeat_one(track, source)
+                return
+            if self._repeat_mode == RepeatMode.REPEAT_QUEUE:
+                await self._requeue_for_repeat_queue(track, source)
+            log.info("skipping unplayable item %s", item_id or track.original_url)
+            # Continue this loop so repeat_queue can immediately revisit the
+            # item at the tail without duplicating queue-advance logic.
+
+    async def _finish_error(self, track: TrackRef, source: str):
+        action = await self._decide_error_action(
+            track,
+            source,
+            self._current_retry_count,
+        )
+        if action == ErrorAction.RETRY:
+            attempt = self._current_retry_count + 1
+            await self._clear_current()
+            action = await self._start_track_with_policy(
+                track,
+                source=source,
+                attempt=attempt,
+            )
+            if action is None:
+                return
+            if action == ErrorAction.STOP:
+                self._clear_active_tracklist()
+                return
+            # Retry-start failure reached a terminal SKIP. Continue through
+            # the same repeat semantics as a playback ERROR -> SKIP.
+            await self._continue_after_skip(track, source, repeat_one=True)
+            return
+
+        await self._clear_current()
+        if action == ErrorAction.STOP:
+            self._clear_active_tracklist()
+            return
+
+        # ErrorAction.SKIP is terminal for this attempt. Repeat policy decides
+        # whether the same track should be retried or moved to the tail.
+        await self._continue_after_skip(track, source, repeat_one=True)
+
+    async def _finish_completed(self, track: TrackRef, source: str):
+        if self._repeat_mode == RepeatMode.REPEAT_ONE:
+            await self._repeat_current(track, source)
+            return
+
+        await self._clear_current()
+        if self._repeat_mode == RepeatMode.REPEAT_QUEUE:
+            await self._requeue_for_repeat_queue(track, source)
+        await self._start_next_if_available()
 
     async def _do_play(self, url: str):
         await self._start_track(TrackRef(original_url=url), source="direct")
@@ -313,140 +396,59 @@ class Controller:
         # Resolve before replacing current playback. If the first item cannot
         # be resolved, the current track and existing active plan stay intact.
         active = ActiveTrackList.from_playlist(playlist)
-        for item in active.snapshot():
-            self.metadata.request(item.url)
+        self._request_metadata(item.url for item in active.snapshot())
         first = active.pop_next()
         assert first is not None
         await self._start_track(first.track, source="playlist")
         self._active_tracklist = active
 
     async def _do_stop(self):
-        if self._current_track is None and self._playback_task is None:
+        if not self._has_current_playback():
             self._clear_active_tracklist()
             return
         await self._stop_current(PlaybackResult.STOPPED, silence=False)
         self._clear_active_tracklist()
 
     async def _do_skip(self):
-        if self._current_track is None and self._playback_task is None:
+        if not self._has_current_playback():
             await self._start_next_if_available()
             return
+        track = self._current_track
+        source = self._current_source or "direct"
+        assert track is not None
         await self._stop_current(PlaybackResult.SKIPPED, silence=True)
-        await self._start_next_if_available()
+        await self._continue_after_skip(track, source)
 
     async def _do_enqueue(self):
-        if (
-            self.session.state == PlaybackState.IDLE
-            and self.session.current is None
-            and self._current_track is None
-            and self._playback_task is None
-        ):
+        if self.session.state == PlaybackState.IDLE and not self.session.current and not self._has_current_playback():
             await self._start_next_if_available()
-
-    async def _finish_error(
-        self,
-        track: TrackRef,
-        source: str,
-    ) -> None:
-        """Handle a terminal playback error after recording its history entry."""
-        attempt = self._current_retry_count
-        action = await self._decide_error_action(track, source, attempt)
-
-        if action == ErrorAction.RETRY:
-            await self._clear_current(preserve_retry_count=True)
-            outcome = await self._start_track_with_policy(
-                track,
-                source=source,
-                attempt=attempt + 1,
-            )
-            if outcome != _StartOutcome.ADVANCE:
-                return
-            await self._start_next_if_available()
-            return
-
-        await self._clear_current()
-        if action == ErrorAction.STOP:
-            self._clear_active_tracklist()
-            return
-
-        if await self._apply_repeat_after_skip(track, source):
-            return
-        await self._start_next_if_available()
-
-    async def _finish_completed(
-        self,
-        track: TrackRef | None,
-        source: str,
-    ) -> None:
-        """Apply repeat policy and advance after normal playback completion."""
-        if self._repeat_mode == RepeatMode.REPEAT_ONE and track is not None:
-            await self._clear_current()
-            await self._start_track(track, source=source)
-            return
-
-        await self._clear_current()
-        if self._repeat_mode == RepeatMode.REPEAT_QUEUE and track is not None:
-            await self._requeue_for_repeat_queue(track, source)
-        await self._start_next_if_available()
 
     async def _do_finished(self, generation: int):
         if generation != self._generation:
             return
 
+        result = self.session.last_result
         if self._playback_task is not None:
             await asyncio.gather(self._playback_task, return_exceptions=True)
         self._playback_task = None
 
-        result = self.session.last_result
-        finished_track = self._current_track
-        finished_started_at = self._current_started_at
-        finished_source = self._current_source or "direct"
+        track = self._current_track
+        source = self._current_source or "direct"
+        started_at = self._current_started_at
+        if track is None or result is None:
+            return
 
-        if result is not None:
-            await self._record_history(finished_track, result, finished_started_at)
-
-        if result == PlaybackResult.ERROR and finished_track is not None:
-            await self._finish_error(finished_track, finished_source)
+        await self._record_history(track, result, started_at)
+        if result == PlaybackResult.ERROR:
+            await self._finish_error(track, source)
         elif result == PlaybackResult.COMPLETED:
-            await self._finish_completed(finished_track, finished_source)
-
-        # STOPPED/SKIPPED are handled by their command paths.
-
-    def _clear_active_tracklist(self):
-        self._active_tracklist = None
-
-    async def _start_next_if_available(self):
-        while True:
-            source = "queue"
-            item_id = None
-
-            if self._active_tracklist is not None:
-                item = self._active_tracklist.pop_next()
-                if item is not None:
-                    track = item.track
-                    source = self._active_tracklist.source_type
-                else:
-                    self._clear_active_tracklist()
-                    continue
-            else:
-                item = await self.queue.pop_next()
-                if item is None:
-                    return
-                await self.events.publish("state.changed", {"resources": ["queue"]})
-                track = item.track
-                item_id = item.id
-
-            outcome = await self._start_track_with_policy(
-                track,
-                source=source,
-                item_id=item_id,
-            )
-            if outcome == _StartOutcome.STARTED:
-                return
-            if outcome == _StartOutcome.STOP:
-                return
-            # SKIP: the current item has already been handled by the repeat
-            # policy. Continue consuming the next source item.
+            await self._finish_completed(track, source)
+        elif result == PlaybackResult.SKIPPED:
+            await self._clear_current()
+            await self._continue_after_skip(track, source)
+        else:
+            await self._clear_current()
+            await self._continue_after_skip(track, source)
 
     async def play_playlist(self, playlist_id: str) -> str:
         playlist = await self._get_playlist_or_raise(playlist_id)
@@ -473,7 +475,7 @@ class Controller:
 
     async def enqueue(self, url: str):
         item = await self.queue.add(url)
-        self.metadata.request(item.url)
+        self._request_metadata([item.url])
         await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
@@ -485,7 +487,7 @@ class Controller:
         if entry is None:
             raise KeyError(entry_id)
         item = await self.queue.add(entry.track.original_url)
-        self.metadata.request(item.url)
+        self._request_metadata([item.url])
         await self.events.publish("state.changed", {"resources": ["queue"]})
         await self._submit("queue")
         return self._queue_item_dict(item)
@@ -615,7 +617,7 @@ class Controller:
                 raise IndexError("playlist index out of range")
             playlist.items.insert(index, item)
         await self.playlists.save(playlist)
-        self.metadata.request(item.url)
+        self._request_metadata([item.url])
         await self.events.publish("state.changed", {"resources": ["playlists"]})
         return {"id": item.id, "url": item.track.original_url}
 
@@ -649,8 +651,7 @@ class Controller:
             for url in urls
         ]
         await self.playlists.save(playlist)
-        for url in urls:
-            self.metadata.request(url)
+        self._request_metadata(urls)
         await self.events.publish("state.changed", {"resources": ["playlists"]})
         return self._playlist_dict(playlist)
 
@@ -674,8 +675,7 @@ class Controller:
 
     async def replace_queue(self, urls: list[str]):
         items = await self.queue.replace(urls)
-        for item in items:
-            self.metadata.request(item.url)
+        self._request_metadata(item.url for item in items)
         await self.events.publish("state.changed", {"resources": ["queue"]})
         if (
             self.session.state == PlaybackState.IDLE
