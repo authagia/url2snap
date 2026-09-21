@@ -343,15 +343,61 @@ class Controller:
         ):
             await self._start_next_if_available()
 
+    async def _finish_error(
+        self,
+        track: TrackRef,
+        source: str,
+    ) -> None:
+        """Handle a terminal playback error after recording its history entry."""
+        attempt = self._current_retry_count
+        action = await self._decide_error_action(track, source, attempt)
+
+        if action == ErrorAction.RETRY:
+            await self._clear_current(preserve_retry_count=True)
+            outcome = await self._start_track_with_policy(
+                track,
+                source=source,
+                attempt=attempt + 1,
+            )
+            if outcome != _StartOutcome.ADVANCE:
+                return
+            await self._start_next_if_available()
+            return
+
+        await self._clear_current()
+        if action == ErrorAction.STOP:
+            self._clear_active_tracklist()
+            return
+
+        if await self._apply_repeat_after_skip(track, source):
+            return
+        await self._start_next_if_available()
+
+    async def _finish_completed(
+        self,
+        track: TrackRef | None,
+        source: str,
+    ) -> None:
+        """Apply repeat policy and advance after normal playback completion."""
+        if self._repeat_mode == RepeatMode.REPEAT_ONE and track is not None:
+            await self._clear_current()
+            await self._start_track(track, source=source)
+            return
+
+        await self._clear_current()
+        if self._repeat_mode == RepeatMode.REPEAT_QUEUE and track is not None:
+            await self._requeue_for_repeat_queue(track, source)
+        await self._start_next_if_available()
+
     async def _do_finished(self, generation: int):
         if generation != self._generation:
             return
 
-        result = self.session.last_result
         if self._playback_task is not None:
             await asyncio.gather(self._playback_task, return_exceptions=True)
         self._playback_task = None
 
+        result = self.session.last_result
         finished_track = self._current_track
         finished_started_at = self._current_started_at
         finished_source = self._current_source or "direct"
@@ -360,54 +406,9 @@ class Controller:
             await self._record_history(finished_track, result, finished_started_at)
 
         if result == PlaybackResult.ERROR and finished_track is not None:
-            attempt = self._current_retry_count
-            action = await self._decide_error_action(
-                finished_track,
-                finished_source,
-                attempt,
-            )
-
-            if action == ErrorAction.RETRY:
-                await self._clear_current(preserve_retry_count=True)
-                outcome = await self._start_track_with_policy(
-                    finished_track,
-                    source=finished_source,
-                    attempt=attempt + 1,
-                )
-                if outcome == _StartOutcome.STARTED:
-                    return
-                if outcome == _StartOutcome.STOP:
-                    return
-                await self._start_next_if_available()
-                return
-
-            await self._clear_current()
-            if action == ErrorAction.STOP:
-                self._clear_active_tracklist()
-                return
-
-            if await self._apply_repeat_after_skip(finished_track, finished_source):
-                return
-            await self._start_next_if_available()
-            return
-
-        if result == PlaybackResult.COMPLETED:
-            completed_track = self._current_track
-            completed_source = self._current_source
-
-            if self._repeat_mode == RepeatMode.REPEAT_ONE and completed_track is not None:
-                source = completed_source or "direct"
-                await self._clear_current()
-                await self._start_track(completed_track, source=source)
-                return
-
-            await self._clear_current()
-            if self._repeat_mode == RepeatMode.REPEAT_QUEUE and completed_track is not None:
-                await self._requeue_for_repeat_queue(
-                    completed_track, completed_source or "direct"
-                )
-            await self._start_next_if_available()
-            return
+            await self._finish_error(finished_track, finished_source)
+        elif result == PlaybackResult.COMPLETED:
+            await self._finish_completed(finished_track, finished_source)
 
         # STOPPED/SKIPPED are handled by their command paths.
 
